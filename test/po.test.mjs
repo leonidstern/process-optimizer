@@ -100,3 +100,11 @@ test('trial --fresh starts from a clean checkout: ignored build output is left b
   const r = po(d, tmp(), 'trial', '--fresh', '--cmd', 'sh build.sh', '--out', 'dist', '--cmd-b', 'sh build.sh')
   assert.match(r.stdout, /compare before ↔ after: 3 files/); assert.match(r.stdout, /NO GAIN/)
 })
+
+test('trial gives both runs one build date, and a binary difference is counted', () => {
+  const d = tmp(); fs.writeFileSync(path.join(d, 'build.sh'), 'mkdir -p dist\nsleep 0.5\nprintf "built %s" "${SOURCE_DATE_EPOCH:-$(date +%s%N)}" > dist/stamp\n')
+  const r = po(d, tmp(), 'trial', '--cmd', 'sh build.sh', '--out', 'dist', '--apply', "sed -i.bak 's/sleep 0.5/sleep 0.1/' build.sh && rm build.sh.bak")
+  assert.match(r.stdout, /verdict  KEEP/)
+  fs.writeFileSync(path.join(d, 'a.bin'), Buffer.from([0, 1, 2, 3, 4, 5, 6, 7])); fs.writeFileSync(path.join(d, 'b.bin'), Buffer.from([0, 1, 9, 9, 4, 5, 6, 7]))
+  assert.match(po(d, tmp(), 'cmp', 'a.bin', 'b.bin').stdout, /2 of 8 bytes differ in 1 place, first at offset 2/)
+})

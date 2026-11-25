@@ -78,7 +78,7 @@ When a profile does not explain it, time the stages one by one, or use the tool'
 Pick the strictest comparison the result allows, and pick it before the change.
 
 - **Files from a deterministic process:** byte-identical. `po cmp`, or `po trial` does it.
-- **Files with known noise** (timestamps, build ids): identical after ignoring those lines, `--ignore-line <regex>`. Name exactly what is ignored.
+- **Files with known noise** (timestamps, build ids): remove the noise at its source where the tool allows (many build tools take a fixed date from `SOURCE_DATE_EPOCH`; `po trial` sets one date for both runs). Otherwise compare after ignoring exactly those lines, `--ignore-line <regex>`, and name what is ignored. When a few bytes of a binary differ, `po cmp` says how many and where: confirm what they are before calling it noise.
 - **Pictures and video:** `po cmp` decodes them and compares pixels, so a re-encode with identical frames passes as equivalent. Use `--px` and `--pct` only for renderer noise you have measured between two unchanged runs, and state the tolerance.
 - **Code behaviour:** the project's tests, with the same pass and fail list before and after, `--check "<test command>"`. Tests that already fail cannot judge.
 - **Data:** row counts, checksums, a diff of sorted output.

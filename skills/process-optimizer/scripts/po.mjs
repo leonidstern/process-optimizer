@@ -199,6 +199,18 @@ function textCompare(a, b, ignore) {
   const cut = s => s === undefined ? '(no line)' : s.length > 90 ? s.slice(0, 90) + '…' : s
   return { same: false, note: `${n} lines differ, first at line ${first + 1}:\n        - ${cut(fa[first])}\n        + ${cut(fb[first])}` }
 }
+// Same-size binaries: how many bytes differ and in how many places. A few bytes in one or two places is usually an embedded date, id or path.
+function binaryNote(a, b) {
+  const sa = fs.statSync(a).size, sb = fs.statSync(b).size
+  if (sa !== sb) return `binary, ${sa} vs ${sb} bytes`
+  const fa = fs.openSync(a, 'r'), fb = fs.openSync(b, 'r'), ba = Buffer.allocUnsafe(1 << 20), bb = Buffer.allocUnsafe(1 << 20)
+  let n, pos = 0, bytes = 0, places = 0, last = -100, first = -1
+  while ((n = fs.readSync(fa, ba, 0, ba.length, null)) > 0) { fs.readSync(fb, bb, 0, n, null)
+    if (ba.compare(bb, 0, n, 0, n) !== 0) for (let i = 0; i < n; i++) if (ba[i] !== bb[i]) { bytes++; if (pos + i - last > 16) places++; last = pos + i; if (first < 0) first = pos + i }
+    pos += n }
+  fs.closeSync(fa); fs.closeSync(fb)
+  return `binary, ${bytes} of ${sa} bytes differ in ${places} place${places === 1 ? '' : 's'}, first at offset ${first}${bytes <= 64 ? ': looks like an embedded date, id or path' : ''}`
+}
 function compareTrees(A, B, tol, ignore) {
   const rels = [...new Set([...Object.keys(A.files), ...Object.keys(B.files)])].sort()
   const res = { identical: 0, equivalent: [], different: [], onlyA: [], onlyB: [], total: rels.length }
@@ -207,7 +219,7 @@ function compareTrees(A, B, tol, ignore) {
     if (fs.statSync(a).size === fs.statSync(b).size && sha(a) === sha(b)) { res.identical++; continue }
     let d = MEDIA.test(r) && haveFf() ? mediaCompare(a, b, tol) : null
     d ??= textCompare(a, b, ignore)
-    d ??= { same: false, note: `binary, ${fs.statSync(a).size} vs ${fs.statSync(b).size} bytes${MEDIA.test(r) && !haveFf() ? ' (install ffmpeg to compare pixels)' : ''}` }
+    d ??= { same: false, note: binaryNote(a, b) + (MEDIA.test(r) && !haveFf() ? ' (install ffmpeg to compare pixels)' : '') }
     ;(d.same ? res.equivalent : res.different).push({ file: r, note: d.note }) }
   res.verdict = res.different.length || res.onlyA.length || res.onlyB.length ? 'DIFFERENT' : res.equivalent.length ? 'EQUIVALENT' : res.total ? 'SAME' : 'EMPTY'
   return res
@@ -278,6 +290,8 @@ async function cmdTrial(o) {
   if ((root + path.sep).startsWith(src + path.sep)) die(`the scratch folder ${HOME} is inside the project; set PO_HOME to a folder outside it`)
   out(`trial in copies of ${src}${o.fresh ? ' (clean checkout: files git ignores are left out)' : ''}\n  scratch  ${root}`)
   for (const d of [A, B]) { if (o.fresh) copyFresh(src, d); else copyTree(src, d); for (const x of o.exclude || []) fs.rmSync(path.join(d, x), { recursive: true, force: true }) }
+  // One fixed build date for both runs, for the many build tools that follow the SOURCE_DATE_EPOCH convention. Only the copies see it.
+  if (!process.env.SOURCE_DATE_EPOCH) process.env.SOURCE_DATE_EPOCH = String(Math.floor(Date.now() / 1000))
   const sh = (cmd, cwd) => spawnSync('sh', ['-c', cmd], { cwd, encoding: 'utf8' })
   // Both copies run at one and the same path, so output that embeds its build folder cannot differ for that reason.
   const at = async (dir, fn) => { fs.renameSync(dir, W); try { return await fn(W) } finally { fs.renameSync(W, dir) } }
