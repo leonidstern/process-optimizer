@@ -7,7 +7,7 @@
 //   po snap   <name> <path>...
 //   po cmp    <a> [<b>] [--px N] [--pct P] [--ignore-line REGEX]...
 //   po trial  --cmd "<command>" --out PATH... (--patch FILE | --apply "<shell>" | --cmd-b "<command>")
-//             [--src DIR] [--fresh] [--exclude PATH]... [--check "<command>"] [--runs N] [--px N] [--pct P] [--ignore-line REGEX]...
+//             [--src DIR] [--fresh] [--noise] [--exclude PATH]... [--check "<command>"] [--runs N] [--timeout S] [--px N] [--pct P] [--ignore-line REGEX]...
 //   po ledger [--session ID] [--all]
 //   po clean  [--all]
 //
@@ -31,7 +31,7 @@ const sha = f => { const h = crypto.createHash('sha256'), fd = fs.openSync(f, 'r
 
 // ---------- arguments ----------
 const MULTI = new Set(['out', 'exclude', 'ignore-line'])
-const FLAGS = new Set(['all', 'json', 'fresh'])
+const FLAGS = new Set(['all', 'json', 'fresh', 'noise'])
 function parse(argv) {
   const o = { _: [], cmd: null }
   for (let i = 0; i < argv.length; i++) {
@@ -94,13 +94,17 @@ function ancestors(rows) {
   return out
 }
 
-function runTimed(cmd, { cwd = process.cwd(), log } = {}) {
+function runTimed(cmd, { cwd = process.cwd(), log, timeoutMs } = {}) {
   return new Promise(resolve => {
     const isWin = process.platform === 'win32'
     const logFd = log ? fs.openSync(log, 'a') : 'ignore'
     const t0 = process.hrtime.bigint()
     const child = isWin ? spawn(cmd, { cwd, shell: true, stdio: ['ignore', logFd, logFd] })
-      : spawn('sh', ['-c', `(\n${cmd}\n)\n__po=$?\ntimes >&3\nexit $__po`], { cwd, stdio: ['ignore', logFd, logFd, 'pipe'] })
+      : spawn('sh', ['-c', `(\n${cmd}\n)\n__po=$?\ntimes >&3\nexit $__po`], { cwd, stdio: ['ignore', logFd, logFd, 'pipe'], detached: !!timeoutMs })
+    let timedOut = false, killer
+    if (timeoutMs && !isWin) killer = setTimeout(() => { timedOut = true
+      try { process.kill(-child.pid, 'SIGTERM') } catch {}
+      setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL') } catch {} }, 5000).unref() }, timeoutMs)
     let timesOut = ''; if (!isWin) child.stdio[3].on('data', d => { timesOut += d })
     const seen = new Map(), other = new Map(); let peak = 0, busySum = 0, samples = 0, mine = null
     const gpu = gpuProbe(), gpuVals = []
@@ -120,7 +124,7 @@ function runTimed(cmd, { cwd = process.cwd(), log } = {}) {
     const timer = setInterval(sample, 500)
     child.on('error', e => { clearInterval(timer); resolve({ wallMs: 0, code: 127, error: e.message }) })
     child.on('close', code => {
-      clearInterval(timer); if (typeof logFd === 'number') fs.closeSync(logFd)
+      clearInterval(timer); clearTimeout(killer); if (typeof logFd === 'number') fs.closeSync(logFd)
       const wallMs = Number(process.hrtime.bigint() - t0) / 1e6
       sample()
       const t = [...timesOut.matchAll(/(\d+)m([\d.,]+)s/g)].map(m => +m[1] * 60 + +m[2].replace(',', '.'))
@@ -135,7 +139,7 @@ function runTimed(cmd, { cwd = process.cwd(), log } = {}) {
       const ownNames = new Set(top.filter(x => x.cpuS >= 0.2 * cpuS).map(x => x.name))
       const twins = Object.entries(oth).filter(([n, e]) => ownNames.has(n) && e.cpuS / wallS >= 0.1).map(([name, e]) => ({ name, n: e.n, cores: e.cpuS / wallS }))
       const g = gpuVals.length ? { name: gpu.name, avg: gpuVals.reduce((a, b) => a + b, 0) / gpuVals.length, peak: Math.max(...gpuVals) } : null
-      resolve({ wallMs, cpuS, cores: wallMs > 0 ? cpuS / (wallMs / 1000) : 0, code: code ?? 1, top, peak, exact: t.length >= 4, gpu: g, others, twins })
+      resolve({ wallMs, cpuS, cores: wallMs > 0 ? cpuS / (wallMs / 1000) : 0, code: timedOut ? 124 : code ?? 1, timedOut, top, peak, exact: t.length >= 4, gpu: g, others, twins })
     })
   })
 }
@@ -240,18 +244,19 @@ function mediaCompare(a, b, tol) {
   if (!ma.length || !mb.length) return null
   if (ma.length !== mb.length) return { same: false, note: `${ma.length} frames vs ${mb.length}` }
   const diff = ma.map((m, i) => m === mb[i] ? -1 : i).filter(i => i >= 0)
-  if (!diff.length) return { same: true, note: ma.length > 1 ? `all ${ma.length} decoded frames identical, bytes differ` : 'decoded pixels identical, bytes differ' }
+  if (!diff.length) return { same: true, dist: 0, note: ma.length > 1 ? `all ${ma.length} decoded frames identical, bytes differ` : 'decoded pixels identical, bytes differ' }
   // rank differing frames by mean squared error, then measure the worst one pixel by pixel
-  let worst = diff[0]
-  if (diff.length > 1) { const r = ff(['-i', a, '-i', b, '-lavfi', '[0:v:0][1:v:0]psnr=stats_file=-', '-f', 'null', '-'], { encoding: 'utf8' }); let top = -1
+  let worst = diff[0], top = -1
+  { const r = ff(['-i', a, '-i', b, '-lavfi', '[0:v:0][1:v:0]psnr=stats_file=-', '-f', 'null', '-'], { encoding: 'utf8' })
     for (const m of (r.stdout || '').matchAll(/n:(\d+) mse_avg:([\d.]+)/g)) if (+m[2] > top) { top = +m[2]; worst = +m[1] - 1 } }
+  const psnr = top > 0 ? 10 * Math.log10(255 * 255 / top) : Infinity, dB = Number.isFinite(psnr) ? `, ${psnr.toFixed(1)} dB PSNR` : ''
   const raw = f => ff(['-i', f, '-map', '0:v:0', '-vf', `select=eq(n\\,${worst})`, '-fps_mode', 'passthrough', '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']).stdout
-  const ra = raw(a), rb = raw(b); if (!ra || !rb || ra.length !== rb.length || !ra.length) return { same: false, note: `${diff.length} of ${ma.length} frames differ` }
+  const ra = raw(a), rb = raw(b); if (!ra || !rb || ra.length !== rb.length || !ra.length) return { same: false, dist: Math.max(top, 1e-9), media: true, note: `${diff.length} of ${ma.length} frames differ${dB}` }
   let max = 0, over = 0; const px = ra.length / 3
   for (let i = 0; i < ra.length; i += 3) { const d = Math.max(Math.abs(ra[i] - rb[i]), Math.abs(ra[i + 1] - rb[i + 1]), Math.abs(ra[i + 2] - rb[i + 2])); if (d > max) max = d; if (d > tol.px) over++ }
   const pct = over / px * 100, ok = (tol.px > 0 || tol.pct > 0) && pct <= tol.pct
   const what = ma.length > 1 ? `${diff.length} of ${ma.length} frames differ; worst frame ${worst}: ` : ''
-  return { same: ok, note: `${what}largest channel difference ${max} of 255, ${pct.toFixed(pct < 0.1 ? 4 : 2)}% of pixels differ by more than ${tol.px}${ok ? ' (within tolerance)' : ''}` }
+  return { same: ok, dist: Math.max(top, 1e-9), media: true, note: `${what}largest channel difference ${max} of 255, ${pct.toFixed(pct < 0.1 ? 4 : 2)}% of pixels differ by more than ${tol.px}${dB}${ok ? ' (within tolerance)' : ''}` }
 }
 function textCompare(a, b, ignore) {
   const sa = fs.statSync(a).size, sb = fs.statSync(b).size; if (sa > 16e6 || sb > 16e6) return null
@@ -259,21 +264,22 @@ function textCompare(a, b, ignore) {
   const keep = l => !ignore.some(re => re.test(l)), la = ba.toString('utf8').split('\n'), lb = bb.toString('utf8').split('\n')
   const fa = la.filter(keep), fb = lb.filter(keep); let n = 0, first = -1
   for (let i = 0; i < Math.max(fa.length, fb.length); i++) if (fa[i] !== fb[i]) { n++; if (first < 0) first = i }
-  if (!n) return { same: true, note: `identical after ignoring ${la.length - fa.length} matching lines` }
+  if (!n) return { same: true, dist: 0, note: `identical after ignoring ${la.length - fa.length} matching lines` }
   const cut = s => s === undefined ? '(no line)' : s.length > 90 ? s.slice(0, 90) + '…' : s
-  return { same: false, note: `${n} lines differ, first at line ${first + 1}:\n        - ${cut(fa[first])}\n        + ${cut(fb[first])}` }
+  return { same: false, dist: n, note: `${n} lines differ, first at line ${first + 1}:\n        - ${cut(fa[first])}\n        + ${cut(fb[first])}` }
 }
 // Same-size binaries: how many bytes differ and in how many places. A few bytes in one or two places is usually an embedded date, id or path.
-function binaryNote(a, b) {
+function binaryNote(a, b) { return binaryDiff(a, b).note }
+function binaryDiff(a, b) {
   const sa = fs.statSync(a).size, sb = fs.statSync(b).size
-  if (sa !== sb) return `binary, ${sa} vs ${sb} bytes`
+  if (sa !== sb) return { dist: Infinity, note: `binary, ${sa} vs ${sb} bytes` }
   const fa = fs.openSync(a, 'r'), fb = fs.openSync(b, 'r'), ba = Buffer.allocUnsafe(1 << 20), bb = Buffer.allocUnsafe(1 << 20)
   let n, pos = 0, bytes = 0, places = 0, last = -100, first = -1
   while ((n = fs.readSync(fa, ba, 0, ba.length, null)) > 0) { fs.readSync(fb, bb, 0, n, null)
     if (ba.compare(bb, 0, n, 0, n) !== 0) for (let i = 0; i < n; i++) if (ba[i] !== bb[i]) { bytes++; if (pos + i - last > 16) places++; last = pos + i; if (first < 0) first = pos + i }
     pos += n }
   fs.closeSync(fa); fs.closeSync(fb)
-  return `binary, ${bytes} of ${sa} bytes differ in ${places} place${places === 1 ? '' : 's'}, first at offset ${first}${bytes <= 64 ? ': looks like an embedded date, id or path' : ''}`
+  return { dist: bytes, note: `binary, ${bytes} of ${sa} bytes differ in ${places} place${places === 1 ? '' : 's'}, first at offset ${first}${bytes <= 64 ? ': looks like an embedded date, id or path' : ''}` }
 }
 function compareTrees(A, B, tol, ignore) {
   const rels = [...new Set([...Object.keys(A.files), ...Object.keys(B.files)])].sort()
@@ -283,8 +289,8 @@ function compareTrees(A, B, tol, ignore) {
     if (fs.statSync(a).size === fs.statSync(b).size && sha(a) === sha(b)) { res.identical++; continue }
     let d = MEDIA.test(r) && haveFf() ? mediaCompare(a, b, tol) : null
     d ??= textCompare(a, b, ignore)
-    d ??= { same: false, note: binaryNote(a, b) + (MEDIA.test(r) && !haveFf() ? ' (install ffmpeg to compare pixels)' : '') }
-    ;(d.same ? res.equivalent : res.different).push({ file: r, note: d.note }) }
+    if (!d) { const bd = binaryDiff(a, b); d = { same: false, dist: bd.dist, note: bd.note + (MEDIA.test(r) && !haveFf() ? ' (install ffmpeg to compare pixels)' : '') } }
+    ;(d.same ? res.equivalent : res.different).push({ file: r, note: d.note, dist: d.dist ?? Infinity, media: !!d.media }) }
   res.verdict = res.different.length || res.onlyA.length || res.onlyB.length ? 'DIFFERENT' : res.equivalent.length ? 'EQUIVALENT' : res.total ? 'SAME' : 'EMPTY'
   return res
 }
@@ -364,10 +370,16 @@ async function cmdTrial(o) {
   if (o.apply) { const r = await at(B, w => sh(o.apply, w)); if (r.status !== 0) die(`--apply failed in the copy (exit ${r.status}):\n${(r.stdout + r.stderr).trim().split('\n').slice(-10).join('\n')}`, 1)
     const d = spawnSync('diff', ['-ruN', 'before', 'after'], { cwd: root, encoding: 'utf8', maxBuffer: 1 << 28 })
     if (d.stdout) { fs.writeFileSync(path.join(root, 'change.patch'), d.stdout); out(`  change   saved as ${path.join(root, 'change.patch')} (apply to the real project with: patch -p1 < it)`) } }
-  const runs = Math.max(1, +(o.runs || 1)), ta = [], tb = []; let ra, rb
+  const runs = Math.max(o.noise ? 2 : 1, +(o.runs || 1)), ta = [], tb = []; let ra, rb
+  const base1 = path.join(root, 'noise-run1')
   for (let i = 0; i < runs; i++) {
     ra = await at(A, w => runTimed(o.cmd, { cwd: w, log })); if (ra.code) { out(`  baseline command failed in the copy (exit ${ra.code}). If the project stores absolute paths (a build folder, a virtual environment), start the copy clean with --fresh or --exclude.\n${tail(log)}`); process.exit(1) }
-    rb = await at(B, w => runTimed(o['cmd-b'] || o.cmd, { cwd: w, log })); if (rb.code) { out(`  changed run failed (exit ${rb.code})\n${tail(log)}\n  verdict  REJECT: the change breaks the run`); process.exit(1) }
+    if (o.noise && i === 0) for (const r of outs) if (fs.existsSync(path.join(A, r))) copyTree(path.join(A, r), path.join(base1, r))
+    // A change that hangs or runs far longer is a failure, not a long wait.
+    const limit = o.timeout ? +o.timeout * 1000 : Math.max(3 * ra.wallMs, ra.wallMs + 60000)
+    rb = await at(B, w => runTimed(o['cmd-b'] || o.cmd, { cwd: w, log, timeoutMs: limit }))
+    if (rb.timedOut) { out(`  changed run stopped after ${secs(limit)} (the unchanged run took ${secs(ra.wallMs)})\n  verdict  REJECT: the change hangs or runs far longer`); process.exit(1) }
+    if (rb.code) { out(`  changed run failed (exit ${rb.code})\n${tail(log)}\n  verdict  REJECT: the change breaks the run`); process.exit(1) }
     ta.push(ra.wallMs); tb.push(rb.wallMs) }
   const ma = median(ta), mb = median(tb), gain = 1 - mb / ma
   out(`  before   ${secs(ma)}   ${ra.cores.toFixed(2)} of ${NCPU} cores${runs > 1 ? `   (${ta.map(t => (t / 1000).toFixed(1)).join(' ')})` : ''}`)
@@ -379,9 +391,23 @@ async function cmdTrial(o) {
   if (o.check) { const ca = await at(A, w => sh(o.check, w)), cb = await at(B, w => sh(o.check, w)); checkOk = cb.status === 0
     out(`  check    before: exit ${ca.status} · after: exit ${cb.status}${ca.status !== 0 ? '   (the check already fails before the change: it cannot judge)' : ''}`)
     if (!checkOk) out((cb.stdout + cb.stderr).trim().split('\n').slice(-8).map(l => '    ' + l).join('\n')) }
-  const same = res.verdict === 'SAME' || res.verdict === 'EQUIVALENT'
+  // --noise: the unchanged command ran twice; a difference no larger than it has from itself is not a change.
+  let same = res.verdict === 'SAME' || res.verdict === 'EQUIVALENT', how = res.verdict === 'SAME' ? 'byte-identical' : 'equivalent'
+  if (o.noise && !same) {
+    const N1 = treeOf(outs, base1, 'before, run 1'), N2 = treeOf(outs, A, 'before, run 2'), nres = compareTrees(N1, N2, tolOf(o), ignoreOf(o))
+    if (nres.verdict === 'SAME' || nres.verdict === 'EQUIVALENT') out('  noise    none: the unchanged command repeats its output exactly, so the difference above is real')
+    else {
+      const noiseOf = new Map(nres.different.map(x => [x.file, x]))
+      out(`  noise    the unchanged command already differs from itself in ${nres.different.length} of ${nres.total} files; the change is judged against that`)
+      let within = !res.onlyA.length && !res.onlyB.length
+      for (const x of res.different) { const n = noiseOf.get(x.file), allowed = n ? (x.media ? n.dist * 1.5 : n.dist) : 0, ok = x.dist <= allowed
+        if (!ok) within = false
+        out(`    ${x.file}: ${ok ? 'within' : 'BEYOND'} its own noise${n ? ` (unchanged vs unchanged: ${n.note.split('\n')[0]})` : ' (identical between unchanged runs)'}`) }
+      if (within) { same = true; how = 'within the run-to-run noise of the unchanged command' }
+    }
+  }
   const verdict = !same ? 'REJECT: the output changed' : !checkOk ? 'REJECT: the check fails after the change'
-    : gain < 0.05 ? `NO GAIN: output unchanged but the time is within noise${runs < 3 ? ' (use --runs 3 to be sure)' : ''}` : `KEEP: output ${res.verdict === 'SAME' ? 'byte-identical' : 'equivalent'}, ${Math.round(gain * 100)}% less time`
+    : gain < 0.05 ? `NO GAIN: output unchanged but the time is within noise${runs < 3 ? ' (use --runs 3 to be sure)' : ''}` : `KEEP: output ${how}, ${Math.round(gain * 100)}% less time`
   out(`  verdict  ${verdict}`)
   out('  the real project was not touched; remove the scratch copies with: po clean')
   process.exit(verdict.startsWith('KEEP') ? 0 : 1)

@@ -1,6 +1,6 @@
 ---
 name: process-optimizer
-description: Make slow, repeated or wasteful work faster or cheaper without changing what it produces. Use when a build, test run, render, export, install, data job or any command is slow or keeps being rerun; when asked to optimize, speed up, or cut the time, cost, energy, memory or size of something, including a product's runtime or battery budget; and before rerunning an expensive step. Measures first, changes one thing at a time in a copy, proves the result unchanged, reports before and after.
+description: Make slow, repeated or wasteful work faster or cheaper without changing what it produces. Use when a build, test run, render, export, install, data job or any command is slow or keeps being rerun; when asked to optimize, speed up, or cut the time, cost, energy, memory or size of something, including idle CPU, frame drops, a product's runtime or battery budget; and before rerunning an expensive step. Measures first, changes one thing at a time in a copy, proves the result unchanged, reports before and after.
 ---
 
 # Process optimizer
@@ -18,6 +18,7 @@ These hold for every change, however small. They are what makes the work safe to
 3. **Work in a copy.** Try changes in a scratch copy, a worktree or a branch. The real thing stays untouched and runnable until a change is proven, and the old path stays available after.
 4. **Nothing outside the copy.** No production, shared service, deploy, push, publish, paid resource, global install or global setting. Never run a process with outside effects (deploy, send, migrate, charge) to measure it: use its dry run, or reason from its logs. Never delete the user's files; `po` keeps its copies in its own folder.
 5. **One change at a time.** Otherwise you cannot say which change helped or which one broke the result. Reject on doubt: an unproven speed-up is worth nothing.
+6. **Leave the machine usable.** Keep a core or two free and watch memory when adding workers, so the user's other work still runs. Never stop a process you did not start.
 
 ## First, avoid the work
 
@@ -43,7 +44,7 @@ These cost nothing and change no files, so apply them always, asked or not. Ever
 3. **Locate.** Rank the parts by share of the total. Only the biggest matters: halving a step that is 5% of the run saves 2.5%. Read the profile before guessing (table below).
 4. **Pick one change**, the highest rung of the ladder that fits the biggest part.
 5. **Try it in a copy and judge.** `po trial` runs before and after in two scratch copies, compares the outputs and gives a verdict. For changes it cannot express, do the same by hand: copy, run, snapshot, change, run, compare.
-6. **Keep or reject.** Keep only on an unchanged result and a gain outside the noise (repeat runs when the gain is under about 10%). Then measure again from step 2: the bottleneck has moved.
+6. **Keep or reject.** Keep only on an unchanged result and a gain outside the noise (repeat runs when the gain is under about 10% or 5 seconds). A change that hangs or runs far longer is a reject; `po trial` stops it at three times the old time. Then measure again from step 2: the bottleneck has moved. When adding workers, go in steps (2, 4, 8) and compare each step with the previous one: they stop paying when a shared resource (one GPU, one disk, memory) is full.
 7. **Stop** when the biggest remaining part is small, the next change would alter the result, or the gain is within noise. Stop after three rejected changes in a row: the process is near its floor. Keep the effort in proportion: the time you spend should be repaid by the saving times the runs to come. "Already tuned, nothing safe to gain" with the measurements is a complete answer. Say what is left and why.
 8. **Report** (format at the end), and record the new way of running it where the project keeps such notes.
 
@@ -90,9 +91,11 @@ When a profile does not explain it, time the stages one by one, or use the tool'
 Pick the strictest comparison the result allows, and pick it before the change.
 
 - **Files from a deterministic process:** byte-identical. `po cmp`, or `po trial` does it.
+- **A process that does not repeat itself** (renderers, recorders, anything timing-dependent): run the unchanged command twice; how much those two outputs differ is the noise floor. "Same" then means the change differs from the old output no more than the old output differs from itself. `po trial --noise` does exactly this and prints both numbers. State the floor in the report.
 - **Files with known noise** (timestamps, build ids): remove the noise at its source where the tool allows (many build tools take a fixed date from `SOURCE_DATE_EPOCH`; `po trial` sets one date for both runs). Otherwise compare after ignoring exactly those lines, `--ignore-line <regex>`, and name what is ignored. When a few bytes of a binary differ, `po cmp` says how many and where: confirm what they are before calling it noise.
 - **Pictures and video:** `po cmp` decodes them and compares pixels, so a re-encode with identical frames passes as equivalent. Use `--px` and `--pct` only for renderer noise you have measured between two unchanged runs, and state the tolerance.
-- **Code behaviour:** the project's tests, with the same pass and fail list before and after, `--check "<test command>"`. Tests that already fail cannot judge.
+- **Code behaviour:** the project's tests, with the same pass and fail list before and after, test by test and not only the counts (`--check "<test command>"` checks the exit code). Tests that already fail cannot judge; a flaky baseline is reported, not fixed.
+- **Runtime behaviour** (an idle page, an app): frames at the same moments are identical, and it still animates, updates and responds the same way.
 - **Data:** row counts, checksums, a diff of sorted output.
 - **Interactive or visual behaviour:** frames captured at the same moments and diffed; the same script of actions giving the same states.
 - **Then look yourself** at whatever differed most. A comparison can pass on something a person would reject.
@@ -131,6 +134,8 @@ Both copies run at one and the same path, so output that embeds its build folder
 - **A faster wrong answer.** Minifiers, optimizers and "safe" flags that rename, merge, reorder or round can break whatever reads the output. Allow only named, structure-preserving transforms, and judge.
 - **Caches that lie.** A cache keyed on less than everything the step reads returns stale results. Key on content of all inputs, including config and tool versions.
 - **Parallel work that shares state.** Workers writing the same file, port, temp folder or cache corrupt each other. Give each its own, and join in a fixed order.
+- **Re-slicing changes the output.** Splitting work differently (workers, chunks, shards) can move video keyframes, test order or random seeds. Keep the old split, or prove sameness again.
+- **A requested output change is not an optimization.** If the user asked for something that changes the output on the way (a format fix, a new size), make it a separate step and report it apart from the speed-up.
 - **Moving the cost instead of removing it.** A faster step that makes a later one slower, or a build-time saving paid at run time. Measure the whole.
 - **Warm against cold.** The second run of anything is faster. Compare like with like, and say which.
 - **Copies with absolute paths.** Build folders and virtual environments store their own location: a copy can break, or quietly keep using the original. Start the copy clean (`--fresh`, `--exclude`) and set it up again inside the copy.
@@ -148,4 +153,5 @@ Keep it to what the user needs to decide and to trust the result:
 - **What was compared and the verdict:** `214 output files byte-identical`, `3,600 frames identical`, `tests: same 412 pass`.
 - **What changed**, in a line each, and how to undo it.
 - **What was tried and rejected**, with the reason, and what is left on the table.
+- "Measured, nothing safe to change, left alone" and "cause found, no fix proven safe, left alone" are complete results. Say them plainly with the numbers.
 - Estimates labelled as estimates.

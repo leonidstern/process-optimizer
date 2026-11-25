@@ -51,6 +51,20 @@ Each pattern names its rung on the ladder and the judge that fits. They are cand
 - **Shrink what is processed** (rung 2): fewer nodes, smaller regions, lower update rate where nothing visible changes.
 - Judge: frames or responses captured at the same moments before and after and diffed; the same sequence of actions gives the same states.
 
+## Idle cost: battery, CPU and network while nothing happens
+
+- **Measure idle first.** CPU of every process of the app over 10 seconds while paused or hidden (a browser counts all its helper processes), animation-frame and timer callbacks per second, network requests per minute. Idle should be close to zero.
+- **Loops that run while nothing changes** (rung 1): an animation loop that keeps running when paused, hidden or finished; polling where an event exists; timers nobody clears. Stop the loop when the state settles, and restart it from every place that can change the state (play, seek, keys, API calls, end of media), or it will not resume.
+- **Off-screen work** (rung 2): animations in hidden tabs or scrolled-away elements; pause them on visibility change.
+- **Oversized refreshes** (rung 2): re-downloading whole resources where a conditional request or a delta would do.
+- Judge: frames at fixed moments identical before and after, and the same behaviour on every engine the product supports.
+
+## Frame time
+
+- Record frame times while it plays in real time, not stepped: median, 95th percentile, worst, and the count over 25 ms and over 42 ms. A threshold sitting on a refresh multiple (34 ms) flips with noise.
+- Measure each engine the users have; headless numbers are relative only.
+- Time the page's own callbacks first, then layout, style and paint. For an engine without a profiler, switch one suspect off at a time in a throwaway copy.
+
 ## Energy, cost and other budgets
 
 Use this when the cost is a budget per use (energy per transaction, money per request, bytes per page) rather than a time you can run.

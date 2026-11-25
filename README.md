@@ -70,7 +70,7 @@ trial in copies of /work/app
 | `po ledger` | What the session spent its time on, and which reruns were avoidable (needs the hook) |
 | `po clean [--all]` | Remove scratch older than 30 minutes, or all of it |
 
-Compare options: `--ignore-line REGEX` drops known noise lines such as timestamps; `--px N --pct P` accepts pictures where at most P% of pixels differ by more than N levels. `--check "<command>"` on a trial also requires that command to pass after the change.
+`--noise` runs the unchanged command twice and accepts a change whose output differs no more than the unchanged command differs from itself (renderers and recorders that never repeat exactly). A changed run that takes three times longer is stopped and rejected (`--timeout S` to set the limit). Compare options: `--ignore-line REGEX` drops known noise lines such as timestamps; `--px N --pct P` accepts pictures where at most P% of pixels differ by more than N levels. `--check "<command>"` on a trial also requires that command to pass after the change.
 
 ## The hook
 

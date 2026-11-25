@@ -122,3 +122,20 @@ test('time lists another copy of the same program running outside the command', 
     assert.match(r.stdout, /twins    1 other node process/)
   } finally { bg.kill() }
 })
+
+test('trial --noise keeps a change whose output varies no more than the unchanged command varies', () => {
+  const d = tmp()
+  fs.writeFileSync(path.join(d, 'build.sh'), 'mkdir -p dist\nsleep 0.8\necho stable > dist/a.txt\nnode -e "console.log(Math.random() < 2 ? \'run \' + process.hrtime.bigint() : \'\')" > dist/b.txt\n')
+  const fast = "sed -i.bak 's/sleep 0.8/sleep 0.1/' build.sh && rm build.sh.bak"
+  assert.match(po(d, tmp(), 'trial', '--cmd', 'sh build.sh', '--out', 'dist', '--apply', fast).stdout, /REJECT: the output changed/)
+  const r = po(d, tmp(), 'trial', '--noise', '--cmd', 'sh build.sh', '--out', 'dist', '--apply', fast)
+  assert.match(r.stdout, /already differs from itself in 1 of 2 files/)
+  assert.match(r.stdout, /KEEP: output within the run-to-run noise/)
+  const worse = fast + ' && echo "echo extra >> dist/a.txt" >> build.sh'
+  assert.match(po(d, tmp(), 'trial', '--noise', '--cmd', 'sh build.sh', '--out', 'dist', '--apply', worse).stdout, /a\.txt: BEYOND its own noise[\s\S]*REJECT/)
+})
+
+test('trial stops a change that hangs', () => {
+  const d = project(), r = po(d, tmp(), 'trial', '--cmd', 'sh build.sh', '--out', 'dist', '--cmd-b', 'sleep 30', '--timeout', '3')
+  assert.match(r.stdout, /REJECT: the change hangs or runs far longer/)
+})
