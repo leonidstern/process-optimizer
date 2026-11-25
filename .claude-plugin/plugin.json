@@ -1,0 +1,12 @@
+{
+  "name": "process-optimizer",
+  "version": "0.1.0",
+  "description": "Make slow or repeated work faster with the result proven unchanged: measure, change one thing in a copy, compare, keep or reject.",
+  "author": {
+    "name": "leonidstern",
+    "url": "https://github.com/LeonidStern"
+  },
+  "homepage": "https://github.com/leonidstern/process-optimizer",
+  "repository": "https://github.com/leonidstern/process-optimizer",
+  "license": "MIT"
+}

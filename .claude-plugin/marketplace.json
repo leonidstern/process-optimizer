@@ -1,0 +1,15 @@
+{
+  "name": "process-optimizer",
+  "description": "A skill, a measuring tool and an advisory hook for making slow or repeated work faster with the result proven unchanged.",
+  "owner": {
+    "name": "leonidstern",
+    "url": "https://github.com/LeonidStern"
+  },
+  "plugins": [
+    {
+      "name": "process-optimizer",
+      "source": "./",
+      "description": "Make slow or repeated work faster with the result proven unchanged."
+    }
+  ]
+}
