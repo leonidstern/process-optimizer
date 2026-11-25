@@ -35,12 +35,16 @@ These cost nothing and change no files, so apply them always, asked or not. Ever
 ## The loop
 
 1. **Define.** Name the cost (wall time, CPU, energy per event, bytes, money, manual steps) and the result that must not change. Note how often the process runs: a saving matters in proportion to cost times frequency. Work that runs once is not worth optimizing.
-2. **Measure.** `po time -- <command>` for the cost and where it goes. `po null --out <outputs> -- <command>` runs it twice with nothing changed: it shows what an unchanged rerun costs and whether the outputs are deterministic. Measure each stage of a multi-stage process separately. Time what the user actually runs, cold and warm.
+2. **Measure.** Run these two before reading any build script:
+   - `po time -- <command>`: the cost, how many cores were busy, which processes did the work.
+   - `po null --out <outputs> -- <command>`: the same command twice with nothing changed. It shows what an unchanged rerun costs and whether the outputs are deterministic, which decides the judge.
+
+   Then measure each stage of a multi-stage process separately. Time what the user actually runs, cold and warm.
 3. **Locate.** Rank the parts by share of the total. Only the biggest matters: halving a step that is 5% of the run saves 2.5%. Read the profile before guessing (table below).
 4. **Pick one change**, the highest rung of the ladder that fits the biggest part.
 5. **Try it in a copy and judge.** `po trial` runs before and after in two scratch copies, compares the outputs and gives a verdict. For changes it cannot express, do the same by hand: copy, run, snapshot, change, run, compare.
 6. **Keep or reject.** Keep only on an unchanged result and a gain outside the noise (repeat runs when the gain is under about 10%). Then measure again from step 2: the bottleneck has moved.
-7. **Stop** when the biggest remaining part is small, the next change would alter the result, or the gain is within noise. Say what is left and why.
+7. **Stop** when the biggest remaining part is small, the next change would alter the result, or the gain is within noise. Stop after three rejected changes in a row: the process is near its floor. Keep the effort in proportion: the time you spend should be repaid by the saving times the runs to come. "Already tuned, nothing safe to gain" with the measurements is a complete answer. Say what is left and why.
 8. **Report** (format at the end), and record the new way of running it where the project keeps such notes.
 
 ## The ladder

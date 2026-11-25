@@ -309,13 +309,22 @@ async function cmdTrial(o) {
 }
 
 // ---------- ledger: what the session spent its time on (written by the plugin's hook) ----------
+const HEADS = /^(npm|pnpm|yarn|bun|npx|git|cargo|go|make|docker|python3?|uv|pip3?|node|deno|gradle|mvn|dotnet|swift|xcodebuild|bundle|rake|mix|just|task|kubectl|terraform|gh)$/
 export const family = cmd => {
-  let s = cmd.trim().replace(/\s+/g, ' ')
-  for (let i = 0; i < 4; i++) s = s.replace(/^cd [^;&|]+(&&|;) ?/, '').replace(/^([A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'[^']*'|\S*) )+/, '').replace(/^(time|nice|sudo|exec|env) /, '')
-  const first = s.split(/ ?(?:&&|\|\||;|\|) ?/)[0].split(' ')
-  const words = []; for (const w of first) { if (w.startsWith('-') || /^\d+$/.test(w)) break; words.push(w); if (words.length === 3) break }
-  if (words.length === 3 && !/^(npm|pnpm|yarn|bun|npx|git|cargo|go|make|docker|python3?|uv|pip3?|node|deno|gradle|mvn|dotnet|swift|xcodebuild|bundle|rake|mix|just|task|kubectl|terraform|gh)$/.test(path.basename(words[0]))) words.length = 2
-  return words.join(' ') || s.slice(0, 40)
+  const TRIVIAL = /^(cd|rm|mkdir|cp|mv|export|set|unset|echo|printf|source|\.|sleep|true|cat|ls|touch|chmod|pushd|popd|wait|test|\[|trap|ulimit|umask)$/
+  const steps = cmd.replace(/<<-?\s*['"]?(\w+)['"]?[\s\S]*?\n\1\b/g, ' ').split(/&&|\|\||;|\n|\|/)
+  let pick = ''
+  for (let s of steps) {
+    s = s.trim().replace(/\s+/g, ' ')
+    for (let i = 0; i < 6; i++) s = s.replace(/^(\(|\{|do|then|else|time|nice|sudo|exec|env|nohup|if|while|until|!) /, '').replace(/^for \w+ in .*$/, '').replace(/^([A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'[^']*'|\$\([^)]*\)|\S*) ?)+/, '')
+    const head = s.split(' ')[0]
+    if (!s || !head || TRIVIAL.test(head) || /^(done|fi|esac|\)|\})$/.test(head)) continue
+    pick = s; break
+  }
+  if (!pick) pick = cmd.trim().replace(/\s+/g, ' ')
+  const words = []; for (const w of pick.split(' ')) { if (w.startsWith('-') || /^\d+$/.test(w) || /^[<>]/.test(w)) break; words.push(w.replace(/^["']|["']$/g, '')); if (words.length === 3) break }
+  if (words.length === 3 && !HEADS.test((words[0] || '').split('/').pop() || '')) words.length = 2
+  return words.join(' ').slice(0, 60) || pick.slice(0, 40)
 }
 function cmdLedger(o) {
   const dir = path.join(os.homedir(), '.claude', 'process-optimizer', 'sessions')

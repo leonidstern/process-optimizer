@@ -118,4 +118,8 @@ test('commands group by what they run, not by their flags', () => {
   expect(family('./scripts/render.sh scene 12')).toBe('./scripts/render.sh scene')
   expect(family('make -j8 all')).toBe('make')
   expect(family('cargo test --release | tail -5')).toBe('cargo test')
+  expect(family('rm -rf out && mkdir out && blender -b scene.blend -a')).toBe('blender')
+  expect(family('export X=1; for i in 1 2 3; do ./render.sh scene $i; done')).toBe('./render.sh scene')
+  expect(family('PO="node /x/po.mjs"; $PO time -- make')).toBe('$PO time')
+  expect(family("python3 - <<'E'\nprint(1)\nE")).toBe('python3')
 })

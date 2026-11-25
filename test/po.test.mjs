@@ -79,6 +79,10 @@ test('family groups commands the same way as the hook', () => {
   assert.equal(family('cd web && FOO=1 npm run build -- --watch'), 'npm run build')
   assert.equal(family('node film.cjs --mp4'), 'node film.cjs')
   assert.equal(family('pytest -x tests/unit'), 'pytest')
+  assert.equal(family('rm -rf out && mkdir out && blender -b scene.blend -a'), 'blender')
+  assert.equal(family('export X=1; for i in 1 2 3; do ./render.sh scene $i; done'), './render.sh scene')
+  assert.equal(family('PO="node /x/po.mjs"; $PO time -- make'), '$PO time')
+  assert.equal(family("python3 - <<'E'\nprint(1)\nE"), 'python3')
 })
 
 test('trial runs both copies at the same path, so output that embeds its folder still compares equal', () => {

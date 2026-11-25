@@ -18,8 +18,7 @@ A plugin for Claude Code with three parts:
 ## Install
 
 ```
-/plugin marketplace add LeonidStern/process-optimizer
-/plugin install process-optimizer
+/plugin install process-optimizer --marketplace leonidstern/process-optimizer
 ```
 
 Only the skill: copy `skills/process-optimizer` into `~/.claude/skills/` (or a project's `.claude/skills/`). The skill and `po` work without the hook.
