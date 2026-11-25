@@ -7,7 +7,7 @@
 //   po snap   <name> <path>...
 //   po cmp    <a> [<b>] [--px N] [--pct P] [--ignore-line REGEX]...
 //   po trial  --cmd "<command>" --out PATH... (--patch FILE | --apply "<shell>" | --cmd-b "<command>")
-//             [--src DIR] [--exclude PATH]... [--check "<command>"] [--runs N] [--px N] [--pct P] [--ignore-line REGEX]...
+//             [--src DIR] [--fresh] [--exclude PATH]... [--check "<command>"] [--runs N] [--px N] [--pct P] [--ignore-line REGEX]...
 //   po ledger [--session ID] [--all]
 //   po clean  [--all]
 //
@@ -31,7 +31,7 @@ const sha = f => { const h = crypto.createHash('sha256'), fd = fs.openSync(f, 'r
 
 // ---------- arguments ----------
 const MULTI = new Set(['out', 'exclude', 'ignore-line'])
-const FLAGS = new Set(['all', 'json', 'show'])
+const FLAGS = new Set(['all', 'json', 'fresh'])
 function parse(argv) {
   const o = { _: [], cmd: null }
   for (let i = 0; i < argv.length; i++) {
@@ -260,24 +260,36 @@ async function cmdNull(o) {
 }
 
 // ---------- trial: A/B in two scratch copies ----------
+// Only the files git does not ignore: what a clean checkout holds.
+function copyFresh(src, dst) {
+  const ls = spawnSync('git', ['-C', src, 'ls-files', '-z', '-co', '--exclude-standard'], { encoding: 'utf8', maxBuffer: 1 << 28 })
+  if (ls.status !== 0) die('--fresh needs the project to be a git repository')
+  const files = ls.stdout.split('\0').filter(f => f && fs.existsSync(path.join(src, f)))
+  fs.mkdirSync(dst, { recursive: true }); const list = dst + '.files'; fs.writeFileSync(list, files.join('\0') + '\0')
+  const r = spawnSync('sh', ['-c', 'tar --null -T "$1" -cf - | tar -xf - -C "$2"', 'sh', list, dst], { cwd: src, encoding: 'utf8' })
+  fs.rmSync(list, { force: true }); if (r.status !== 0) die(`could not copy the tracked files: ${r.stderr}`)
+}
+
 async function cmdTrial(o) {
   const src = path.resolve(o.src || '.'), outs = o.out || [], ways = ['patch', 'apply', 'cmd-b'].filter(k => o[k])
-  if (!o.cmd || !outs.length || ways.length !== 1) die('usage: po trial --cmd "<command>" --out PATH... (--patch FILE | --apply "<shell>" | --cmd-b "<command>") [--src DIR] [--exclude PATH]... [--check "<command>"] [--runs N]')
-  const root = path.join(HOME, 'trial', new Date().toISOString().replace(/[:.]/g, '-')), A = path.join(root, 'A'), B = path.join(root, 'B'), log = path.join(root, 'trial.log')
+  if (!o.cmd || !outs.length || ways.length !== 1) die('usage: po trial --cmd "<command>" --out PATH... (--patch FILE | --apply "<shell>" | --cmd-b "<command>") [--src DIR] [--fresh] [--exclude PATH]... [--check "<command>"] [--runs N]')
+  const root = path.join(HOME, 'trial', new Date().toISOString().replace(/[:.]/g, '-')), A = path.join(root, 'before'), B = path.join(root, 'after'), W = path.join(root, 'work'), log = path.join(root, 'trial.log')
   const patch = o.patch && path.resolve(o.patch); if (patch && !fs.existsSync(patch)) die(`no such patch: ${o.patch}`)
   if ((root + path.sep).startsWith(src + path.sep)) die(`the scratch folder ${HOME} is inside the project; set PO_HOME to a folder outside it`)
-  out(`trial in copies of ${src}\n  scratch  ${root}`)
-  for (const d of [A, B]) { copyTree(src, d); for (const x of o.exclude || []) fs.rmSync(path.join(d, x), { recursive: true, force: true }) }
+  out(`trial in copies of ${src}${o.fresh ? ' (clean checkout: files git ignores are left out)' : ''}\n  scratch  ${root}`)
+  for (const d of [A, B]) { if (o.fresh) copyFresh(src, d); else copyTree(src, d); for (const x of o.exclude || []) fs.rmSync(path.join(d, x), { recursive: true, force: true }) }
   const sh = (cmd, cwd) => spawnSync('sh', ['-c', cmd], { cwd, encoding: 'utf8' })
+  // Both copies run at one and the same path, so output that embeds its build folder cannot differ for that reason.
+  const at = async (dir, fn) => { fs.renameSync(dir, W); try { return await fn(W) } finally { fs.renameSync(W, dir) } }
   if (patch) { const g = spawnSync('git', ['apply', '--whitespace=nowarn', patch], { cwd: B, encoding: 'utf8' })
     if (g.status !== 0) { const p = sh(`patch -p1 < '${patch.replace(/'/g, `'\\''`)}'`, B); if (p.status !== 0) die(`the patch does not apply to the copy:\n${g.stderr || p.stdout}`, 1) } }
-  if (o.apply) { const r = sh(o.apply, B); if (r.status !== 0) die(`--apply failed in the copy (exit ${r.status}):\n${(r.stdout + r.stderr).trim().split('\n').slice(-10).join('\n')}`, 1)
-    const d = spawnSync('diff', ['-ruN', 'A', 'B'], { cwd: root, encoding: 'utf8', maxBuffer: 1 << 28 })
+  if (o.apply) { const r = await at(B, w => sh(o.apply, w)); if (r.status !== 0) die(`--apply failed in the copy (exit ${r.status}):\n${(r.stdout + r.stderr).trim().split('\n').slice(-10).join('\n')}`, 1)
+    const d = spawnSync('diff', ['-ruN', 'before', 'after'], { cwd: root, encoding: 'utf8', maxBuffer: 1 << 28 })
     if (d.stdout) { fs.writeFileSync(path.join(root, 'change.patch'), d.stdout); out(`  change   saved as ${path.join(root, 'change.patch')} (apply to the real project with: patch -p1 < it)`) } }
   const runs = Math.max(1, +(o.runs || 1)), ta = [], tb = []; let ra, rb
   for (let i = 0; i < runs; i++) {
-    ra = await runTimed(o.cmd, { cwd: A, log }); if (ra.code) { out(`  baseline command failed in the copy (exit ${ra.code}). Copies can break builds that store absolute paths: start from a clean state or exclude the build folder.\n${tail(log)}`); process.exit(1) }
-    rb = await runTimed(o['cmd-b'] || o.cmd, { cwd: B, log }); if (rb.code) { out(`  changed run failed (exit ${rb.code})\n${tail(log)}\n  verdict  REJECT: the change breaks the run`); process.exit(1) }
+    ra = await at(A, w => runTimed(o.cmd, { cwd: w, log })); if (ra.code) { out(`  baseline command failed in the copy (exit ${ra.code}). If the project stores absolute paths (a build folder, a virtual environment), start the copy clean with --fresh or --exclude.\n${tail(log)}`); process.exit(1) }
+    rb = await at(B, w => runTimed(o['cmd-b'] || o.cmd, { cwd: w, log })); if (rb.code) { out(`  changed run failed (exit ${rb.code})\n${tail(log)}\n  verdict  REJECT: the change breaks the run`); process.exit(1) }
     ta.push(ra.wallMs); tb.push(rb.wallMs) }
   const ma = median(ta), mb = median(tb), gain = 1 - mb / ma
   out(`  before   ${secs(ma)}   ${ra.cores.toFixed(2)} of ${NCPU} cores${runs > 1 ? `   (${ta.map(t => (t / 1000).toFixed(1)).join(' ')})` : ''}`)
@@ -285,7 +297,7 @@ async function cmdTrial(o) {
   out(`  change   ${gain >= 0 ? `${Math.round(gain * 100)}% less time (${(ma / mb).toFixed(2)}x)` : `${Math.round(-gain * 100)}% MORE time`}`)
   const TA = treeOf(outs, A, 'before'), TB = treeOf(outs, B, 'after'), res = compareTrees(TA, TB, tolOf(o), ignoreOf(o)); printCompare(res, TA, TB, '  ')
   let checkOk = true
-  if (o.check) { const ca = sh(o.check, A), cb = sh(o.check, B); checkOk = cb.status === 0
+  if (o.check) { const ca = await at(A, w => sh(o.check, w)), cb = await at(B, w => sh(o.check, w)); checkOk = cb.status === 0
     out(`  check    before: exit ${ca.status} · after: exit ${cb.status}${ca.status !== 0 ? '   (the check already fails before the change: it cannot judge)' : ''}`)
     if (!checkOk) out((cb.stdout + cb.stderr).trim().split('\n').slice(-8).map(l => '    ' + l).join('\n')) }
   const same = res.verdict === 'SAME' || res.verdict === 'EQUIVALENT'

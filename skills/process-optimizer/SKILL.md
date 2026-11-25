@@ -102,11 +102,13 @@ po null   [--out PATH]... -- <command>            same command twice, nothing ch
 po snap   <name> <path>...                        keep a copy of outputs to compare against
 po cmp    <a> [<b>]                               snapshot, file or folder; bytes, then pixels or lines
 po trial  --cmd "<command>" --out PATH... (--patch FILE | --apply "<shell>" | --cmd-b "<command>")
-          [--check "<command>"] [--runs N] [--exclude PATH]...
+          [--check "<command>"] [--runs N] [--fresh] [--exclude PATH]...
 po ledger                                         what this session spent its time on (with the plugin's hook)
 ```
 
 `po trial` copies the project twice, runs the command unchanged in one copy and with the change in the other, compares the `--out` paths and prints `KEEP`, `NO GAIN` or `REJECT`. `--patch` and `--apply` change files in the copy; `--cmd-b` runs a different command. It exits 0 only on `KEEP`. The real project is never touched; apply a kept change yourself afterwards. Compare options: `--ignore-line REGEX`, `--px N --pct P`.
+
+Both copies run at one and the same path, so output that embeds its build folder still compares. `--fresh` starts each copy as a clean checkout (files git ignores are left out): use it to measure a build from scratch, and when the folder holds things that store their own location. Prefer `po time` to a bare `time`: it also says how many cores were busy, which is what picks the next move.
 
 ## Traps
 
@@ -115,7 +117,7 @@ po ledger                                         what this session spent its ti
 - **Parallel work that shares state.** Workers writing the same file, port, temp folder or cache corrupt each other. Give each its own, and join in a fixed order.
 - **Moving the cost instead of removing it.** A faster step that makes a later one slower, or a build-time saving paid at run time. Measure the whole.
 - **Warm against cold.** The second run of anything is faster. Compare like with like, and say which.
-- **Copies with absolute paths.** Some build folders store their own location and break, or write back to the original, when copied. Exclude them or start the copy clean.
+- **Copies with absolute paths.** Build folders and virtual environments store their own location: a copy can break, or quietly keep using the original. Start the copy clean (`--fresh`, `--exclude`) and set it up again inside the copy.
 - **Another machine.** Core counts, disks, encoders and fonts differ. Say where each number was measured, and measure again where it will run.
 - **Noise.** One run proves little when the gain is small. Repeat, and report the median.
 
@@ -125,7 +127,8 @@ More patterns by kind of work (builds and installs, tests, renders and media, da
 
 Keep it to what the user needs to decide and to trust the result:
 
-- **Before and after**, per change and in total, with where it was measured: `build 94 s → 31 s (3.0x), 4-core Linux container`.
+- **Before and after**, per change and in total, with where it was measured: `build 94 s → 31 s (3.0x), 4-core Linux container`. The headline counts only changes proven to keep the result.
+- **Trade-offs apart from the headline:** a change that alters the result is listed separately, with what it would add and exactly what it changes, for the user to decide.
 - **What was compared and the verdict:** `214 output files byte-identical`, `3,600 frames identical`, `tests: same 412 pass`.
 - **What changed**, in a line each, and how to undo it.
 - **What was tried and rejected**, with the reason, and what is left on the table.

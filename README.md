@@ -67,9 +67,9 @@ trial in copies of /work/app
 | `po null [--out PATH]... -- <command>` | The same command twice: cost of an unchanged rerun, and whether outputs are deterministic |
 | `po snap <name> <path>...` | Keep a copy of outputs to compare against later |
 | `po cmp <a> [<b>]` | Compare snapshots, files or folders: bytes first, then decoded pixels (needs ffmpeg) or text lines |
-| `po trial --cmd ... --out ... (--patch F \| --apply "sh" \| --cmd-b "cmd")` | Before and after in two scratch copies, compared, with a verdict |
+| `po trial --cmd ... --out ... (--patch F \| --apply "sh" \| --cmd-b "cmd")` | Before and after in two scratch copies run at the same path, compared, with a verdict. `--fresh` starts from a clean checkout |
 | `po ledger` | What the session spent its time on, and which reruns were avoidable (needs the hook) |
-| `po clean` | Remove the scratch folder |
+| `po clean [--all]` | Remove scratch older than 30 minutes, or all of it |
 
 Compare options: `--ignore-line REGEX` drops known noise lines such as timestamps; `--px N --pct P` accepts pictures where at most P% of pixels differ by more than N levels. `--check "<command>"` on a trial also requires that command to pass after the change.
 

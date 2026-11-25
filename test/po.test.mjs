@@ -80,3 +80,19 @@ test('family groups commands the same way as the hook', () => {
   assert.equal(family('node film.cjs --mp4'), 'node film.cjs')
   assert.equal(family('pytest -x tests/unit'), 'pytest')
 })
+
+test('trial runs both copies at the same path, so output that embeds its folder still compares equal', () => {
+  const d = tmp(); fs.writeFileSync(path.join(d, 'build.sh'), 'mkdir -p dist\nsleep 0.6\npwd > dist/where.txt\n')
+  const r = po(d, tmp(), 'trial', '--cmd', 'sh build.sh', '--out', 'dist', '--apply', "sed -i.bak 's/sleep 0.6/sleep 0.1/' build.sh && rm build.sh.bak")
+  assert.match(r.stdout, /verdict  KEEP: output byte-identical/)
+})
+
+test('trial --fresh starts from a clean checkout: ignored build output is left behind', () => {
+  const d = project(), git = (...a) => spawnSync('git', a, { cwd: d })
+  fs.writeFileSync(path.join(d, '.gitignore'), 'dist/\ncache/\n'); fs.mkdirSync(path.join(d, 'cache')); fs.writeFileSync(path.join(d, 'cache/stale'), 'x')
+  fs.appendFileSync(path.join(d, 'build.sh'), 'test ! -e cache/stale\n')
+  git('init', '-q'); git('add', '-A')
+  assert.equal(po(d, tmp(), 'trial', '--cmd', 'sh build.sh', '--out', 'dist', '--cmd-b', 'sh build.sh').status, 1)
+  const r = po(d, tmp(), 'trial', '--fresh', '--cmd', 'sh build.sh', '--out', 'dist', '--cmd-b', 'sh build.sh')
+  assert.match(r.stdout, /compare before ↔ after: 3 files/); assert.match(r.stdout, /NO GAIN/)
+})
