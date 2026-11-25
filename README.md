@@ -6,7 +6,7 @@ A plugin for Claude Code with three parts:
 
 - **A skill** (`skills/process-optimizer`) that gives the method: name the cost and the result that must not change, measure, find the biggest part, change one thing in a copy, prove the result is the same, keep or reject, report before and after. It works for builds, test suites, renders, exports, data jobs, interactive frame time, and budgets you cannot run (energy per use, cost per request).
 - **A tool**, `po`, that does the measuring and the proving. No dependencies, Node 18+.
-- **An advisory hook** that times the commands a session runs and adds one line when a command is slow, keeps adding up, or was rerun with nothing changed. It never blocks or changes a command.
+- **An advisory hook** that times the commands a session runs, adds one line when a command is slow, keeps adding up, or was rerun with nothing changed, and tells each new session which commands were slow here before. It never blocks or changes a command.
 
 ## Why it is safe
 
@@ -80,7 +80,9 @@ After a Bash command the hook may add one line that only the model reads:
 - the same kind of command has run three or more times and keeps adding up (it backs off: 1 min, then 2, 4, 8 in total);
 - the exact command had already succeeded and no file was edited since.
 
-It keeps a ledger per session in `~/.claude/process-optimizer/sessions/`, which `po ledger` reads. Set `PROCESS_OPTIMIZER_QUIET=1` to keep the ledger and drop the lines.
+It also adds one short section to the system prompt: a standing reminder to run the narrowest command that answers the question and not to rerun unchanged work, followed by the commands earlier sessions measured as slow in this project (`node build.js about 94 s (12 runs)`), so the cost is known before the command runs.
+
+It keeps a ledger per session in `~/.claude/process-optimizer/sessions/`, which `po ledger` reads. Set `PROCESS_OPTIMIZER_QUIET=1` to keep the ledger and drop the lines and the section.
 
 ## Develop
 

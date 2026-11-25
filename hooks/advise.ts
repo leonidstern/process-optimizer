@@ -1,6 +1,7 @@
 // Advisory only. Times every Bash call, keeps a ledger of the session's commands, and adds at most one
-// line after a call when the same work is being repeated or a command is slow. It never blocks, rewrites
-// or withholds a call: on any failure of its own the tool's result goes through untouched.
+// line after a call when the same work is being repeated or a command is slow. It adds one short section
+// to the system prompt: a standing reminder, plus the commands earlier sessions measured as slow here.
+// It never blocks, rewrites or withholds a call: on any failure of its own everything goes through untouched.
 import type { Register } from 'claude-code'
 
 const SLOW_MS = 60_000 // one run this long is worth a line
@@ -38,7 +39,32 @@ export const family = (cmd: string): string => {
 const span = (ms: number): string =>
   ms < 90_000 ? `${Math.round(ms / 1000)} s` : `${(ms / 60_000).toFixed(1)} min`
 
+const STANDING =
+  'Before a command that takes more than a few seconds, run the narrowest version that answers the question at hand (one test, one file, one frame, a dry run), and do not rerun a command that already succeeded when nothing it reads has changed. Keep full runs for the end.'
+const KNOWN_MS = 30_000 // a command family this slow on average is worth naming up front
+const KNOWN_DAYS = 30
+
 export const register: Register = on => {
+  // What earlier sessions measured in this project, said once in the system prompt, so the cost is known before the command runs.
+  on('prompt.compose', async ($, e, next) => {
+    const base = await next(e)
+    try {
+      if ((await $.env.get('PROCESS_OPTIMIZER_QUIET')) === '1') return base
+      const root = await $.session.root()
+      const now = await $.clock.now()
+      const fams = (((await $.store.get('families')) ?? {}) as Fams)[root] ?? {}
+      const slow = Object.entries(fams)
+        .filter(([, f]) => f.ms / f.n >= KNOWN_MS && now - f.at < KNOWN_DAYS * 86_400_000)
+        .sort((a, b) => b[1].ms - a[1].ms)
+        .slice(0, 5)
+        .map(([k, f]) => `\`${k}\` about ${span(f.ms / f.n)} (${f.n} run${f.n === 1 ? '' : 's'})`)
+      const known = slow.length > 0 ? ` Slow commands measured here in earlier sessions: ${slow.join('; ')}.` : ''
+      return { sections: [...base.sections, { id: 'process-optimizer:costs', text: STANDING + known, scope: 'session' as const }] }
+    } catch {
+      return base
+    }
+  }).catch((_, e, next) => next(e))
+
   const calls: Call[] = []
   const lastOk = new Map<string, { edits: number; t: number; redos: number }>()
   let edits = 0

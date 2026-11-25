@@ -123,3 +123,20 @@ test('commands group by what they run, not by their flags', () => {
   expect(family('PO="node /x/po.mjs"; $PO time -- make')).toBe('$PO time')
   expect(family("python3 - <<'E'\nprint(1)\nE")).toBe('python3')
 })
+
+test('the system prompt gets one section, naming commands measured as slow earlier', async ($, on) => {
+  const w = world(on, () => 84_000)
+  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are…', scope: 'shared' }] }))
+  const FACTS = { model: 'm', promptModel: 'm', surfaces: [], tools: ['Bash'], outputStyle: null, traits: [] }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const compose = () => ($ as any).prompt.compose(FACTS)
+  const before = await compose()
+  expect(before.sections.length).toBe(2)
+  expect(before.sections[1]?.id).toBe('process-optimizer:costs')
+  expect(before.sections[1]?.text).not.toMatch(/Slow commands measured here/)
+  await bash($, w, 'node film.cjs --mp4', 84_000)
+  const after = await compose()
+  expect(after.sections[1]?.text).toMatch(/Slow commands measured here in earlier sessions: `node film.cjs` about 84 s \(1 run\)\./)
+  w.env.PROCESS_OPTIMIZER_QUIET = '1'
+  expect((await compose()).sections.length).toBe(1)
+})
