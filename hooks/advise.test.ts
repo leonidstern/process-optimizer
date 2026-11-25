@@ -120,8 +120,12 @@ test('commands group by what they run, not by their flags', () => {
   expect(family('cargo test --release | tail -5')).toBe('cargo test')
   expect(family('rm -rf out && mkdir out && blender -b scene.blend -a')).toBe('blender')
   expect(family('export X=1; for i in 1 2 3; do ./render.sh scene $i; done')).toBe('./render.sh scene')
-  expect(family('PO="node /x/po.mjs"; $PO time -- make')).toBe('$PO time')
-  expect(family("python3 - <<'E'\nprint(1)\nE")).toBe('python3')
+  expect(family("python3 - <<'E'\nprint(1)\nE")).toBe('python3 (inline script)')
+  expect(family("node -e \"\nconst { chromium } = require('playwright')\n\"")).toBe('node (inline script)')
+  expect(family('run(){ name=$1; echo $name; }; run film')).toBe('run film')
+  expect(family('(time node tools/rec.cjs film.html out.mp4) 2>&1 | head -5')).toBe('node tools/rec.cjs')
+  expect(family('timeout 600 taskset -c 0-3 blender -b s.blend -a 2>/dev/null')).toBe('blender')
+  expect(family("cat > x.cjs <<'EOF'\nconst a = 1\nEOF\nnode x.cjs")).toBe('node x.cjs')
 })
 
 test('the system prompt gets one section, naming commands measured as slow earlier', async ($, on) => {

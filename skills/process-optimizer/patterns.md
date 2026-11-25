@@ -26,6 +26,8 @@ Each pattern names its rung on the ladder and the judge that fits. They are cand
 
 ## Renders, exports and media
 
+- **The device first.** Check the renderer or encoder actually uses the GPU or hardware encoder the machine has. Batch runs commonly default to the CPU because they do not load the interactive preferences; set the device in the render script or command line, and read the run's log to confirm. An idle GPU in `po time` during a render is the sign.
+- **One machine, one heavy job.** Several renders, recordings or sessions started at once on one machine share the same cores and GPU, and each runs slower than alone; several workers of one job only pay when the machine has room (measure 1, 2, 4 workers). Check `po time` for `others` and `twins` before deciding.
 - **Render only what changed** (rung 2): frames, tiles, pages or scenes whose inputs changed, joined with the untouched ones.
 - **Stream, don't spill** (rung 5). Pipe frames into the encoder instead of writing thousands of temporary files.
 - **One process per worker** (rung 4). Tabs in one browser, threads behind one lock, or several jobs on one GPU context often do not run in parallel; separate processes do. Split into ordered slices and join losslessly (stream copy, not re-encode).

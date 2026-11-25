@@ -15,25 +15,47 @@ type Call = { t: number; cmd: string; ms: number; ok: boolean; redo?: true }
 type Fam = { n: number; ms: number; next: number; at: number }
 type Fams = Record<string, Record<string, Fam>>
 
-const HEADS = /^(npm|pnpm|yarn|bun|npx|git|cargo|go|make|docker|python3?|uv|pip3?|node|deno|gradle|mvn|dotnet|swift|xcodebuild|bundle|rake|mix|just|task|kubectl|terraform|gh)$/
+const HEADS = /^(npm|pnpm|yarn|bun|npx|git|cargo|go|make|docker|uv|pip3?|gradle|mvn|dotnet|swift|xcodebuild|bundle|rake|mix|just|task|kubectl|terraform|gh)$/
 
 // The same grouping as `family` in skills/process-optimizer/scripts/po.mjs: "cd x && FOO=1 npm run build -- --flag" is "npm run build",
 // and a compound command is named by its first step that does real work.
+// Split a shell command into its steps at top-level separators, leaving quoted text and heredoc bodies whole.
+const shellSteps = (cmd: string): string[] => {
+  const src = cmd.replace(/<<-?\s*['"]?(\w+)['"]?[^\n]*\n[\s\S]*?\n\s*\1\b/g, (m: string) => m.slice(0, m.indexOf('\n')).replace(/<<-?\s*['"]?\w+['"]?/, ''))
+  const out: string[] = []; let cur = '', q = '', esc = false
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i], n = src[i + 1]
+    if (esc) { cur += c; esc = false; continue }
+    if (c === '\\' && q !== "'") { cur += c; esc = true; continue }
+    if (q) { if (c === q) q = ''; cur += c; continue }
+    if (c === '"' || c === "'") { q = c; cur += c; continue }
+    if (c === '\n' || c === ';' || c === '|' || (c === '&' && n === '&') || (c === '&' && n !== '>' && src[i - 1] !== '>')) {
+      out.push(cur); cur = ''; if ((c === '&' || c === '|') && n === c) i++; continue }
+    cur += c
+  }
+  out.push(cur)
+  return out.map(s => s.trim()).filter(Boolean)
+}
+const TRIVIAL = /^(cd|rm|mkdir|cp|mv|ln|export|set|unset|echo|printf|source|\.|sleep|true|false|cat|ls|touch|chmod|pushd|popd|wait|test|\[|\[\[|trap|ulimit|umask|head|tail|grep|sed|awk|wc|sort|uniq|tee|xargs|uptime|date|pwd|which|nproc|ps|df|du|free|kill|pkill|pgrep|exit|return|local|read|shift|cut|tr|basename|dirname|realpath|readlink|stat|diff|cmp|file|env)$/
 export const family = (cmd: string): string => {
-  const TRIVIAL = /^(cd|rm|mkdir|cp|mv|export|set|unset|echo|printf|source|\.|sleep|true|cat|ls|touch|chmod|pushd|popd|wait|test|\[|trap|ulimit|umask)$/
-  const steps = cmd.replace(/<<-?\s*['"]?(\w+)['"]?[\s\S]*?\n\1\b/g, ' ').split(/&&|\|\||;|\n|\|/)
-  let pick = ''
-  for (let s of steps) {
-    s = s.trim().replace(/\s+/g, ' ')
-    for (let i = 0; i < 6; i++) s = s.replace(/^(\(|\{|do|then|else|time|nice|sudo|exec|env|nohup|if|while|until|!) /, '').replace(/^for \w+ in .*$/, '').replace(/^([A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'[^']*'|\$\([^)]*\)|\S*) ?)+/, '')
+  let pick = '', first = ''
+  for (let s of shellSteps(cmd)) {
+    s = s.replace(/\s+/g, ' ')
+    for (let i = 0; i < 8; i++)
+      s = s.replace(/^[({!] ?/, '').replace(/^\w+ ?\(\) ?\{? ?/, '').replace(/^(do|then|else|elif|if|while|until|time|\/usr\/bin\/time|nice|sudo|exec|nohup|command|builtin) /, '')
+        .replace(/^(timeout|gtimeout) (-\S+ )*\d+\w* /, '').replace(/^taskset (-\S+ )*\S+ /, '').replace(/^for \w+ in .*$/, '').replace(/^case .*$/, '')
+        .replace(/^([A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'[^']*'|\$\([^)]*\)|\S*) ?)+/, '').trim()
     const head = s.split(' ')[0] ?? ''
-    if (!s || !head || TRIVIAL.test(head) || /^(done|fi|esac|\)|\})$/.test(head)) continue
+    if (!first && s && !/^(done|fi|esac|#|\/\/|[)}])/.test(head)) first = s
+    if (!s || !head || TRIVIAL.test(head) || /^(done|fi|esac|\)|\}|#|\/\/|[0-9]*[<>])/.test(head) || /^[)}]/.test(head)) continue
     pick = s; break
   }
-  if (!pick) pick = cmd.trim().replace(/\s+/g, ' ')
-  const words: string[] = []; for (const w of pick.split(' ')) { if (w.startsWith('-') || /^\d+$/.test(w) || /^[<>]/.test(w)) break; words.push(w.replace(/^["']|["']$/g, '')); if (words.length === 3) break }
-  if (words.length === 3 && !HEADS.test((words[0] ?? '').split('/').pop() || '')) words.length = 2
-  return words.join(' ').slice(0, 60) || pick.slice(0, 40)
+  if (!pick) pick = first || cmd.trim().replace(/\s+/g, ' ')
+  const words: string[] = []
+  for (const w of pick.split(' ')) { if (w.startsWith('-') || /^\d+$/.test(w) || /^[<>0-9]*[<>]/.test(w) || /^["'$]/.test(w)) break; words.push(w.replace(/[)}]+$/, '')); if (words.length === 3) break }
+  if (words.length === 3 && !HEADS.test((words[0] || '').split('/').pop() || '')) words.length = 2
+  const base = (words.join(' ') || pick.slice(0, 40)).slice(0, 60)
+  return words.length === 1 && /^\S+ (-e|-c|-|--eval|-p)( |$)/.test(pick) ? `${base} (inline script)` : base
 }
 
 const span = (ms: number): string =>

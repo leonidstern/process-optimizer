@@ -36,7 +36,7 @@ These cost nothing and change no files, so apply them always, asked or not. Ever
 
 1. **Define.** Name the cost (wall time, CPU, energy per event, bytes, money, manual steps) and the result that must not change. Note how often the process runs: a saving matters in proportion to cost times frequency. Work that runs once is not worth optimizing.
 2. **Measure.** Run these two before reading any build script:
-   - `po time -- <command>`: the cost, how many cores were busy, which processes did the work.
+   - `po time -- <command>`: the cost, how many cores were busy, which processes did the work, whether the GPU was used, and what else was running on the machine.
    - `po null --out <outputs> -- <command>`: the same command twice with nothing changed. It shows what an unchanged rerun costs and whether the outputs are deterministic, which decides the judge.
 
    Then measure each stage of a multi-stage process separately. Time what the user actually runs, cold and warm.
@@ -58,6 +58,15 @@ Try the rungs in this order. Higher rungs save more and risk less.
 5. **Do it cheaper.** A better algorithm, a faster tool or setting that gives the same result, a hardware path, streaming instead of temporary files.
 6. **Do it off the critical path.** Later, lazily, or in the background, so nobody waits for it.
 
+## Check the machine before the method
+
+The cheapest wins are often not in the process at all but in how the machine runs it. Check these first; `po time` reports the first three.
+
+- **The right hardware.** Work that can run on the GPU (rendering, video encoding, image and ML work) quietly falling back to the CPU: an idle GPU while the CPU is busy. Batch and headless runs often ignore the device settings an interactive session uses, so the run must set the device itself. Confirm from the tool's own log which device it used, and compare one frame or item on each.
+- **Competing load.** Other processes using the cores: leftover runs from earlier, several sessions or agents doing the same work at once, dev servers, watchers, background renders. They slow the work and make every timing unreliable. `po time` lists them under `others`, and `twins` flags copies of the same program running outside the command. Never stop a process you did not start: name it to the user, who decides.
+- **All the cores.** A tool running one worker where the machine has many (see the table below).
+- **Where it runs.** A laptop on battery, a throttled container, a network drive or a synced folder (cloud drives, antivirus scanning every write) can cost more than the work. Temporary and output files belong on a fast local disk.
+
 ## Reading the measurement
 
 | `po` shows | It means | Look at |
@@ -70,6 +79,9 @@ Try the rungs in this order. Higher rungs save more and risk less.
 | Null run outputs differ | Not deterministic | Fix the cause (timestamps, random ids, ordering) before judging anything by bytes |
 | One process dominates "where" | That tool is the cost | Its own options, how many times it starts, what it is fed |
 | Many short-lived processes | Startup cost repeated | One warm process, batching |
+| `gpu` idle while the CPU works | The work may be running on the wrong device | The tool's device setting in the run itself, then compare one item on each device |
+| `gpu` busy above 80% | The GPU is the bottleneck | Fewer or cheaper GPU passes; more CPU workers will not help |
+| `others` high, or `twins` | Something else is competing | Name it to the user; measure again when the machine is quiet |
 
 When a profile does not explain it, time the stages one by one, or use the tool's own profiler. Do not guess.
 

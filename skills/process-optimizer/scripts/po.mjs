@@ -63,6 +63,37 @@ function procTable() {
   return rows
 }
 
+// GPU busy %, where the machine tells it without extra rights: Apple GPUs through ioreg, NVIDIA through nvidia-smi.
+// Returns null when no GPU can be read, so nothing is said about one.
+let GPU
+function gpuProbe() {
+  if (GPU !== undefined) return GPU
+  GPU = null
+  if (process.platform === 'darwin') {
+    const r = spawnSync('ioreg', ['-r', '-d', '1', '-w', '0', '-c', 'IOAccelerator'], { encoding: 'utf8', timeout: 3000 })
+    if (/"Device Utilization %"=\d+/.test(r.stdout || '')) {
+      const name = ((r.stdout.match(/"model"\s*=\s*"([^"]+)"/) || [])[1] || 'GPU').replace(/^Apple /, 'Apple ')
+      GPU = { name, read: () => { const o = spawnSync('ioreg', ['-r', '-d', '1', '-w', '0', '-c', 'IOAccelerator'], { encoding: 'utf8', timeout: 3000 }).stdout || ''
+        const v = [...o.matchAll(/"Device Utilization %"=(\d+)/g)].map(m => +m[1]); return v.length ? Math.max(...v) : null } }
+    }
+  } else {
+    const q = () => spawnSync('nvidia-smi', ['--query-gpu=utilization.gpu,name', '--format=csv,noheader,nounits'], { encoding: 'utf8', timeout: 3000 })
+    const r = q()
+    if (r.status === 0 && /\d/.test(r.stdout || '')) {
+      const name = (r.stdout.split('\n')[0].split(',')[1] || 'NVIDIA GPU').trim()
+      GPU = { name, read: () => { const v = (q().stdout || '').split('\n').map(l => parseInt(l, 10)).filter(n => n >= 0); return v.length ? Math.max(...v) : null } }
+    }
+  }
+  return GPU
+}
+
+// The caller and its ancestors (this tool, the shell, the agent that started it) are not "other" load.
+function ancestors(rows) {
+  const byPid = new Map(rows.map(r => [r.pid, r])), out = new Set([process.pid]); let p = byPid.get(process.pid)
+  while (p && p.ppid > 1 && !out.has(p.ppid)) { out.add(p.ppid); p = byPid.get(p.ppid) }
+  return out
+}
+
 function runTimed(cmd, { cwd = process.cwd(), log } = {}) {
   return new Promise(resolve => {
     const isWin = process.platform === 'win32'
@@ -71,25 +102,40 @@ function runTimed(cmd, { cwd = process.cwd(), log } = {}) {
     const child = isWin ? spawn(cmd, { cwd, shell: true, stdio: ['ignore', logFd, logFd] })
       : spawn('sh', ['-c', `(\n${cmd}\n)\n__po=$?\ntimes >&3\nexit $__po`], { cwd, stdio: ['ignore', logFd, logFd, 'pipe'] })
     let timesOut = ''; if (!isWin) child.stdio[3].on('data', d => { timesOut += d })
-    const seen = new Map(); let peak = 0, busySum = 0, samples = 0
+    const seen = new Map(), other = new Map(); let peak = 0, busySum = 0, samples = 0, mine = null
+    const gpu = gpuProbe(), gpuVals = []
     const sample = () => { if (isWin) return
       const rows = procTable(), kids = new Map(); for (const r of rows) (kids.get(r.ppid) || kids.set(r.ppid, []).get(r.ppid)).push(r)
-      const stack = [child.pid]; let busy = 0
-      while (stack.length) for (const r of kids.get(stack.pop()) || []) { stack.push(r.pid)
+      mine ??= ancestors(rows)
+      const stack = [child.pid], tree = new Set([child.pid]); let busy = 0
+      while (stack.length) for (const r of kids.get(stack.pop()) || []) { stack.push(r.pid); tree.add(r.pid)
         const key = r.pid + ':' + r.name, prev = seen.get(key); if (prev && r.cpu > prev.cpu) busy++
         if (!prev || r.cpu > prev.cpu) seen.set(key, { name: r.name, cpu: r.cpu }) }
+      // Everything else on the machine: first and latest CPU time per process, to see what competed during the run.
+      for (const r of rows) { if (tree.has(r.pid) || mine.has(r.pid) || r.pid <= 2 || r.ppid === 2) continue
+        const key = r.pid + ':' + r.name, o = other.get(key); if (o) o.last = r.cpu; else other.set(key, { name: r.name, first: r.cpu, last: r.cpu }) }
+      if (gpu) { const v = gpu.read(); if (v !== null) gpuVals.push(v) }
       peak = Math.max(peak, busy); busySum += busy; samples++ }
+    sample()
     const timer = setInterval(sample, 500)
     child.on('error', e => { clearInterval(timer); resolve({ wallMs: 0, code: 127, error: e.message }) })
     child.on('close', code => {
       clearInterval(timer); if (typeof logFd === 'number') fs.closeSync(logFd)
       const wallMs = Number(process.hrtime.bigint() - t0) / 1e6
+      sample()
       const t = [...timesOut.matchAll(/(\d+)m([\d.,]+)s/g)].map(m => +m[1] * 60 + +m[2].replace(',', '.'))
       const byName = {}; for (const v of seen.values()) byName[v.name] = (byName[v.name] || 0) + v.cpu
       const sampled = Object.values(byName).reduce((a, b) => a + b, 0)
       const cpuS = t.length >= 4 ? t[2] + t[3] : sampled
       const top = Object.entries(byName).filter(([n, c]) => c >= 0.05 && n !== 'sh').sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, c]) => ({ name, cpuS: c }))
-      resolve({ wallMs, cpuS, cores: wallMs > 0 ? cpuS / (wallMs / 1000) : 0, code: code ?? 1, top, peak, exact: t.length >= 4 })
+      const oth = {}; for (const v of other.values()) { const d = v.last - v.first; if (d <= 0) continue; const e = oth[v.name] ||= { n: 0, cpuS: 0 }; e.n++; e.cpuS += d }
+      const othS = Object.values(oth).reduce((a, e) => a + e.cpuS, 0), wallS = wallMs / 1000
+      const others = { cores: wallS > 0 ? othS / wallS : 0, top: Object.entries(oth).sort((a, b) => b[1].cpuS - a[1].cpuS).slice(0, 4).map(([name, e]) => ({ name, n: e.n, cores: e.cpuS / wallS })) }
+      // Same program as this command's main work, running outside it: leftovers or parallel sessions.
+      const ownNames = new Set(top.filter(x => x.cpuS >= 0.2 * cpuS).map(x => x.name))
+      const twins = Object.entries(oth).filter(([n, e]) => ownNames.has(n) && e.cpuS / wallS >= 0.1).map(([name, e]) => ({ name, n: e.n, cores: e.cpuS / wallS }))
+      const g = gpuVals.length ? { name: gpu.name, avg: gpuVals.reduce((a, b) => a + b, 0) / gpuVals.length, peak: Math.max(...gpuVals) } : null
+      resolve({ wallMs, cpuS, cores: wallMs > 0 ? cpuS / (wallMs / 1000) : 0, code: code ?? 1, top, peak, exact: t.length >= 4, gpu: g, others, twins })
     })
   })
 }
@@ -97,10 +143,27 @@ function runTimed(cmd, { cwd = process.cwd(), log } = {}) {
 function reading(r) {
   const c = r.cores, idle = NCPU - 1
   if (r.wallMs < 1000) return 'too short to read; time a longer or repeated run'
+  const oc = r.others?.cores ?? 0
+  if (oc >= NCPU * 0.5 && c + oc >= NCPU * 0.8) return `the machine was saturated by other processes (${oc.toFixed(1)} of ${NCPU} cores, listed under others): this command got only ${c.toFixed(1)} cores, so this time says little about the command itself. Measure again when the machine is quiet`
   if (c < 0.5) return `mostly waiting (${c.toFixed(2)} cores busy): look for sleeps, fixed waits, timeouts, serial network or disk requests, or a process that idles before exiting`
   if (c < 1.3) return NCPU > 1 ? `one core busy while ${idle} sit idle: serial CPU work. Candidates: skip unchanged work, cache, or split into parallel workers` : 'one core busy on a one-core machine: only less work will help'
   if (c >= NCPU * 0.75) return `all ${NCPU} cores busy: more workers will not help; only doing less work will (skip, cache, cheaper settings)`
   return `partly parallel (${c.toFixed(1)} of ${NCPU} cores): find the serial stretch, usually setup, a single-threaded step or a final join`
+}
+
+// What the machine was doing besides the command: the GPU, and other processes competing for the cores.
+function machineLines(r, indent = '  ') {
+  const L = []
+  if (r.gpu && r.wallMs >= 1000) {
+    if (r.gpu.peak < 10 && r.cores >= 0.5) L.push(`${indent}gpu      ${r.gpu.name} idle during the run (peak ${r.gpu.peak}%) while ${r.cores.toFixed(1)} cores worked. If this work can run on the GPU (rendering, encoding, image or ML work), check which device the tool actually used: headless and batch runs often fall back to the CPU`)
+    else L.push(`${indent}gpu      ${r.gpu.name} ${Math.round(r.gpu.avg)}% busy on average, peak ${r.gpu.peak}%${r.gpu.avg >= 80 ? ': the GPU is the bottleneck; more CPU workers will not help, fewer or cheaper GPU passes will' : ''}`)
+  }
+  if (r.others && r.others.cores >= 0.3) {
+    const list = r.others.top.filter(x => x.cores >= 0.05).map(x => `${x.name}${x.n > 1 ? ' ×' + x.n : ''} ${x.cores.toFixed(1)}`).join(', ')
+    L.push(`${indent}others   other processes used ${r.others.cores.toFixed(1)} of ${NCPU} cores during the run${list ? ': ' + list : ''}. Timings are skewed while they run${r.others.cores >= NCPU * 0.25 ? ', and they take cores this work could use' : ''}`)
+  }
+  for (const t of r.twins || []) L.push(`${indent}twins    ${t.n} other ${t.name} process${t.n > 1 ? 'es' : ''} (${t.cores.toFixed(1)} cores) ran at the same time outside this command: a leftover run or another session doing the same work? Tell the user; do not stop processes you did not start`)
+  return L
 }
 
 const logFile = tag => { fs.mkdirSync(path.join(HOME, 'logs'), { recursive: true }); return path.join(HOME, 'logs', `${tag}-${Date.now()}.log`) }
@@ -117,6 +180,7 @@ async function cmdTime(o) {
   out(`  cpu      ${mid.cpuS.toFixed(1)} s = ${mid.cores.toFixed(2)} of ${NCPU} cores${mid.exact ? '' : ' (sampled)'}`)
   out(`  reading  ${reading(mid)}`)
   if (mid.top.length) out(`  where    ${mid.top.map(t => `${t.name} ${t.cpuS.toFixed(1)} s`).join(' · ')}${mid.peak > 1 ? `   (up to ${mid.peak} busy processes at once)` : ''}`)
+  for (const l of machineLines(mid)) out(l)
   out(`  exit     ${last.code}${last.code ? '   last output:\n' + tail(log) : ''}`)
   out(`  log      ${log}`)
   process.exit(last.code ? 1 : 0)
@@ -309,6 +373,7 @@ async function cmdTrial(o) {
   out(`  before   ${secs(ma)}   ${ra.cores.toFixed(2)} of ${NCPU} cores${runs > 1 ? `   (${ta.map(t => (t / 1000).toFixed(1)).join(' ')})` : ''}`)
   out(`  after    ${secs(mb)}   ${rb.cores.toFixed(2)} of ${NCPU} cores${runs > 1 ? `   (${tb.map(t => (t / 1000).toFixed(1)).join(' ')})` : ''}`)
   out(`  change   ${gain >= 0 ? `${Math.round(gain * 100)}% less time (${(ma / mb).toFixed(2)}x)` : `${Math.round(-gain * 100)}% MORE time`}`)
+  for (const l of machineLines(rb).filter(l => !/^\s+gpu/.test(l) || /idle/.test(l))) out(l)
   const TA = treeOf(outs, A, 'before'), TB = treeOf(outs, B, 'after'), res = compareTrees(TA, TB, tolOf(o), ignoreOf(o)); printCompare(res, TA, TB, '  ')
   let checkOk = true
   if (o.check) { const ca = await at(A, w => sh(o.check, w)), cb = await at(B, w => sh(o.check, w)); checkOk = cb.status === 0
@@ -323,22 +388,44 @@ async function cmdTrial(o) {
 }
 
 // ---------- ledger: what the session spent its time on (written by the plugin's hook) ----------
-const HEADS = /^(npm|pnpm|yarn|bun|npx|git|cargo|go|make|docker|python3?|uv|pip3?|node|deno|gradle|mvn|dotnet|swift|xcodebuild|bundle|rake|mix|just|task|kubectl|terraform|gh)$/
+const HEADS = /^(npm|pnpm|yarn|bun|npx|git|cargo|go|make|docker|uv|pip3?|gradle|mvn|dotnet|swift|xcodebuild|bundle|rake|mix|just|task|kubectl|terraform|gh)$/
+// Split a shell command into its steps at top-level separators, leaving quoted text and heredoc bodies whole.
+const shellSteps = cmd => {
+  const src = cmd.replace(/<<-?\s*['"]?(\w+)['"]?[^\n]*\n[\s\S]*?\n\s*\1\b/g, m => m.slice(0, m.indexOf('\n')).replace(/<<-?\s*['"]?\w+['"]?/, ''))
+  const out = []; let cur = '', q = '', esc = false
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i], n = src[i + 1]
+    if (esc) { cur += c; esc = false; continue }
+    if (c === '\\' && q !== "'") { cur += c; esc = true; continue }
+    if (q) { if (c === q) q = ''; cur += c; continue }
+    if (c === '"' || c === "'") { q = c; cur += c; continue }
+    if (c === '\n' || c === ';' || c === '|' || (c === '&' && n === '&') || (c === '&' && n !== '>' && src[i - 1] !== '>')) {
+      out.push(cur); cur = ''; if ((c === '&' || c === '|') && n === c) i++; continue }
+    cur += c
+  }
+  out.push(cur)
+  return out.map(s => s.trim()).filter(Boolean)
+}
+const TRIVIAL = /^(cd|rm|mkdir|cp|mv|ln|export|set|unset|echo|printf|source|\.|sleep|true|false|cat|ls|touch|chmod|pushd|popd|wait|test|\[|\[\[|trap|ulimit|umask|head|tail|grep|sed|awk|wc|sort|uniq|tee|xargs|uptime|date|pwd|which|nproc|ps|df|du|free|kill|pkill|pgrep|exit|return|local|read|shift|cut|tr|basename|dirname|realpath|readlink|stat|diff|cmp|file|env)$/
 export const family = cmd => {
-  const TRIVIAL = /^(cd|rm|mkdir|cp|mv|export|set|unset|echo|printf|source|\.|sleep|true|cat|ls|touch|chmod|pushd|popd|wait|test|\[|trap|ulimit|umask)$/
-  const steps = cmd.replace(/<<-?\s*['"]?(\w+)['"]?[\s\S]*?\n\1\b/g, ' ').split(/&&|\|\||;|\n|\|/)
-  let pick = ''
-  for (let s of steps) {
-    s = s.trim().replace(/\s+/g, ' ')
-    for (let i = 0; i < 6; i++) s = s.replace(/^(\(|\{|do|then|else|time|nice|sudo|exec|env|nohup|if|while|until|!) /, '').replace(/^for \w+ in .*$/, '').replace(/^([A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'[^']*'|\$\([^)]*\)|\S*) ?)+/, '')
-    const head = s.split(' ')[0]
-    if (!s || !head || TRIVIAL.test(head) || /^(done|fi|esac|\)|\})$/.test(head)) continue
+  let pick = '', first = ''
+  for (let s of shellSteps(cmd)) {
+    s = s.replace(/\s+/g, ' ')
+    for (let i = 0; i < 8; i++)
+      s = s.replace(/^[({!] ?/, '').replace(/^\w+ ?\(\) ?\{? ?/, '').replace(/^(do|then|else|elif|if|while|until|time|\/usr\/bin\/time|nice|sudo|exec|nohup|command|builtin) /, '')
+        .replace(/^(timeout|gtimeout) (-\S+ )*\d+\w* /, '').replace(/^taskset (-\S+ )*\S+ /, '').replace(/^for \w+ in .*$/, '').replace(/^case .*$/, '')
+        .replace(/^([A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'[^']*'|\$\([^)]*\)|\S*) ?)+/, '').trim()
+    const head = s.split(' ')[0] ?? ''
+    if (!first && s && !/^(done|fi|esac|#|\/\/|[)}])/.test(head)) first = s
+    if (!s || !head || TRIVIAL.test(head) || /^(done|fi|esac|\)|\}|#|\/\/|[0-9]*[<>])/.test(head) || /^[)}]/.test(head)) continue
     pick = s; break
   }
-  if (!pick) pick = cmd.trim().replace(/\s+/g, ' ')
-  const words = []; for (const w of pick.split(' ')) { if (w.startsWith('-') || /^\d+$/.test(w) || /^[<>]/.test(w)) break; words.push(w.replace(/^["']|["']$/g, '')); if (words.length === 3) break }
+  if (!pick) pick = first || cmd.trim().replace(/\s+/g, ' ')
+  const words = []
+  for (const w of pick.split(' ')) { if (w.startsWith('-') || /^\d+$/.test(w) || /^[<>0-9]*[<>]/.test(w) || /^["'$]/.test(w)) break; words.push(w.replace(/[)}]+$/, '')); if (words.length === 3) break }
   if (words.length === 3 && !HEADS.test((words[0] || '').split('/').pop() || '')) words.length = 2
-  return words.join(' ').slice(0, 60) || pick.slice(0, 40)
+  const base = (words.join(' ') || pick.slice(0, 40)).slice(0, 60)
+  return words.length === 1 && /^\S+ (-e|-c|-|--eval|-p)( |$)/.test(pick) ? `${base} (inline script)` : base
 }
 function cmdLedger(o) {
   const dir = path.join(os.homedir(), '.claude', 'process-optimizer', 'sessions')

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { family } from '../skills/process-optimizer/scripts/po.mjs'
 
 const PO = new URL('../skills/process-optimizer/scripts/po.mjs', import.meta.url).pathname
@@ -81,8 +81,12 @@ test('family groups commands the same way as the hook', () => {
   assert.equal(family('pytest -x tests/unit'), 'pytest')
   assert.equal(family('rm -rf out && mkdir out && blender -b scene.blend -a'), 'blender')
   assert.equal(family('export X=1; for i in 1 2 3; do ./render.sh scene $i; done'), './render.sh scene')
-  assert.equal(family('PO="node /x/po.mjs"; $PO time -- make'), '$PO time')
-  assert.equal(family("python3 - <<'E'\nprint(1)\nE"), 'python3')
+  assert.equal(family("python3 - <<'E'\nprint(1)\nE"), 'python3 (inline script)')
+  assert.equal(family("node -e \"\nconst { chromium } = require('playwright')\n\""), 'node (inline script)')
+  assert.equal(family('run(){ name=$1; echo $name; }; run film'), 'run film')
+  assert.equal(family('(time node tools/rec.cjs film.html out.mp4) 2>&1 | head -5'), 'node tools/rec.cjs')
+  assert.equal(family('timeout 600 taskset -c 0-3 blender -b s.blend -a 2>/dev/null'), 'blender')
+  assert.equal(family("cat > x.cjs <<'EOF'\nconst a = 1\nEOF\nnode x.cjs"), 'node x.cjs')
 })
 
 test('trial runs both copies at the same path, so output that embeds its folder still compares equal', () => {
@@ -107,4 +111,14 @@ test('trial gives both runs one build date, and a binary difference is counted',
   assert.match(r.stdout, /verdict  KEEP/)
   fs.writeFileSync(path.join(d, 'a.bin'), Buffer.from([0, 1, 2, 3, 4, 5, 6, 7])); fs.writeFileSync(path.join(d, 'b.bin'), Buffer.from([0, 1, 9, 9, 4, 5, 6, 7]))
   assert.match(po(d, tmp(), 'cmp', 'a.bin', 'b.bin').stdout, /2 of 8 bytes differ in 1 place, first at offset 2/)
+})
+
+test('time lists another copy of the same program running outside the command', () => {
+  const d = tmp(), busy = 'const e=Date.now()+%d;while(Date.now()<e){}'
+  const bg = spawn('node', ['-e', busy.replace('%d', '6000')], { stdio: 'ignore' })
+  try {
+    const r = po(d, tmp(), 'time', '--', `node -e "${busy.replace('%d', '2500')}"`)
+    assert.match(r.stdout, /others   other processes used/)
+    assert.match(r.stdout, /twins    1 other node process/)
+  } finally { bg.kill() }
 })
