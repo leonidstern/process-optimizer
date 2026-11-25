@@ -9,7 +9,7 @@
 //   po trial  --cmd "<command>" --out PATH... (--patch FILE | --apply "<shell>" | --cmd-b "<command>")
 //             [--src DIR] [--exclude PATH]... [--check "<command>"] [--runs N] [--px N] [--pct P] [--ignore-line REGEX]...
 //   po ledger [--session ID] [--all]
-//   po clean
+//   po clean  [--all]
 //
 // It never edits, moves or deletes anything outside its own scratch folder (PO_HOME, default <tmp>/process-optimizer).
 import fs from 'node:fs'
@@ -95,9 +95,9 @@ function runTimed(cmd, { cwd = process.cwd(), log } = {}) {
 }
 
 function reading(r) {
-  const c = r.cores, idle = NCPU - Math.round(c)
+  const c = r.cores, idle = NCPU - 1
   if (r.wallMs < 1000) return 'too short to read; time a longer or repeated run'
-  if (c < 0.35) return `mostly waiting (${c.toFixed(2)} cores busy): look for sleeps, fixed waits, timeouts, serial network or disk requests, or a process that idles before exiting`
+  if (c < 0.5) return `mostly waiting (${c.toFixed(2)} cores busy): look for sleeps, fixed waits, timeouts, serial network or disk requests, or a process that idles before exiting`
   if (c < 1.3) return NCPU > 1 ? `one core busy while ${idle} sit idle: serial CPU work. Candidates: skip unchanged work, cache, or split into parallel workers` : 'one core busy on a one-core machine: only less work will help'
   if (c >= NCPU * 0.75) return `all ${NCPU} cores busy: more workers will not help; only doing less work will (skip, cache, cheaper settings)`
   return `partly parallel (${c.toFixed(1)} of ${NCPU} cores): find the serial stretch, usually setup, a single-threaded step or a final join`
@@ -327,7 +327,14 @@ function cmdLedger(o) {
   if (rep.length) out(`  repeated and slow: ${rep.map(([k, e]) => `${k} (${e.n}x, ${secs(e.ms)})`).join(' · ')}: the first candidates to measure with po time and po null`)
 }
 
-function cmdClean() { fs.rmSync(HOME, { recursive: true, force: true }); out(`removed ${HOME}`) }
+// Removes scratch older than half an hour, so a trial another session is running survives; --all removes everything.
+function cmdClean(o) {
+  if (o.all) { fs.rmSync(HOME, { recursive: true, force: true }); return out(`removed ${HOME}`) }
+  let n = 0; const old = Date.now() - 30 * 60000
+  for (const kind of ['trial', 'null', 'logs', 'snap']) { const d = path.join(HOME, kind); if (!fs.existsSync(d)) continue
+    for (const e of fs.readdirSync(d)) { const p = path.join(d, e); if (kind === 'snap' || fs.statSync(p).mtimeMs < old) { fs.rmSync(p, { recursive: true, force: true }); n++ } } }
+  out(`removed ${n} scratch entries from ${HOME}${n ? '' : ' (newer ones are kept for 30 minutes; po clean --all removes everything)'}`)
+}
 
 const isMain = process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(new URL(import.meta.url).pathname)
 if (isMain) {

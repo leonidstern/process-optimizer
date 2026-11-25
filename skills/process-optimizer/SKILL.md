@@ -58,7 +58,7 @@ Try the rungs in this order. Higher rungs save more and risk less.
 
 | `po` shows | It means | Look at |
 | --- | --- | --- |
-| Under about 0.3 cores busy | Waiting, not working | Sleeps and fixed waits, timeouts, retries, serial network or disk requests, a process that idles before exit |
+| Under about 0.5 cores busy | Waiting, not working | Sleeps and fixed waits, timeouts, retries, serial network or disk requests, a process that idles before exit |
 | About 1 core busy, others idle | Serial CPU work | Rungs 1 to 3 first, then parallel workers |
 | All cores busy | Already parallel | Only less work helps: rungs 1 to 3 and 5 |
 | Between 1 and all cores | Partly parallel | The serial stretch: setup, one single-threaded step, the final join |
